@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SlidePanel</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="panel-shell">
+    <header id="tabBar" class="tab-bar" hidden aria-label="Tabs"></header>
+    <pre id="debugOverlay" class="debug-overlay" hidden></pre>
+    <div id="loadingOverlay" class="loading-overlay" hidden aria-live="polite" aria-label="Loading">
+      <div class="loading-overlay__spinner" aria-hidden="true"></div>
+    </div>
+    <div id="networkOverlay" class="network-overlay" hidden role="alert" aria-live="polite">
+      <div class="network-overlay__card">
+        <svg
+          class="network-overlay__icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M2 8.5C5 6 8.5 4.7 12 4.7" opacity="0.45" />
+          <path d="M22 8.5c-1.6-1.3-3.4-2.3-5.3-2.9" opacity="0.45" />
+          <path d="M5.5 12.5c1.4-1 3-1.7 4.7-2" opacity="0.7" />
+          <path d="M18.5 12.5c-1-.7-2-1.2-3.1-1.6" opacity="0.7" />
+          <path d="M9 16.2c.9-.6 1.9-1 3-1" />
+          <circle cx="12" cy="19.2" r="1" fill="currentColor" stroke="none" />
+          <line x1="3" y1="3" x2="21" y2="21" stroke-width="2" />
+        </svg>
+        <h2 class="network-overlay__title">No internet connection</h2>
+        <p class="network-overlay__hint" id="networkOverlayHint">
+          Check your network and try again.
+        </p>
+        <button type="button" id="networkOverlayRetry" class="network-overlay__retry">
+          Retry
+        </button>
+      </div>
+    </div>
+    <div id="launcherShell" class="launcher-shell" hidden>
+      <main class="launcher">
+        <p class="launcher-hint">
+          Choose which models get your prompt, then send (Pro tab sessions — log in once per site).
+        </p>
+        <div class="launcher-targets" role="group" aria-label="Models to message">
+          <button type="button" class="launcher-pill launcher-pill--on" data-llm="chatgpt" aria-pressed="true">
+            ChatGPT
+          </button>
+          <button type="button" class="launcher-pill launcher-pill--on" data-llm="gemini" aria-pressed="true">
+            Gemini
+          </button>
+          <button type="button" class="launcher-pill launcher-pill--on" data-llm="claude" aria-pressed="true">
+            Claude
+          </button>
+        </div>
+        <form id="launcherForm" class="launcher-form">
+          <input
+            id="launcherInput"
+            type="search"
+            class="launcher-input"
+            placeholder="Your question…"
+            autocomplete="off"
+          />
+          <button type="submit" id="launcherSubmit" class="launcher-submit">Send</button>
+        </form>
+        <p id="launcherStatus" class="launcher-status" aria-live="polite"></p>
+      </main>
+    </div>
+
+    <script>
+      const tabBar = document.getElementById("tabBar");
+      const launcherShell = document.getElementById("launcherShell");
+      const launcherForm = document.getElementById("launcherForm");
+      const launcherInput = document.getElementById("launcherInput");
+      const launcherSubmit = document.getElementById("launcherSubmit");
+      const launcherStatus = document.getElementById("launcherStatus");
+      const launcherTargets = document.querySelector(".launcher-targets");
+      const networkOverlay = document.getElementById("networkOverlay");
+      const networkOverlayHint = document.getElementById("networkOverlayHint");
+      const networkOverlayRetry = document.getElementById("networkOverlayRetry");
+      const loadingOverlay = document.getElementById("loadingOverlay");
+      const debugOverlay = document.getElementById("debugOverlay");
+
+      let networkRetryInFlight = false;
+
+      async function retryNetwork() {
+        if (networkRetryInFlight) {
+          return;
+        }
+        networkRetryInFlight = true;
+        networkOverlayRetry.disabled = true;
+        const originalHint = networkOverlayHint.textContent;
+        networkOverlayHint.textContent = "Retrying…";
+        try {
+          await window.slidePanel.reloadWebview();
+        } catch {
+          // The next panel-state event will tell us the result; nothing to do here.
+        } finally {
+          // Re-enable shortly so the user can click again if they need to.
+          setTimeout(() => {
+            networkOverlayRetry.disabled = false;
+            if (!networkOverlay.hidden) {
+              networkOverlayHint.textContent = originalHint;
+            }
+            networkRetryInFlight = false;
+          }, 600);
+        }
+      }
+
+      networkOverlayRetry.addEventListener("click", () => {
+        void retryNetwork();
+      });
+
+      window.addEventListener("online", () => {
+        if (!networkOverlay.hidden) {
+          void retryNetwork();
+        }
+      });
+
+      function getLauncherTargets() {
+        const out = { chatgpt: false, gemini: false, claude: false };
+        if (!launcherTargets) {
+          return out;
+        }
+        launcherTargets.querySelectorAll(".launcher-pill[data-llm]").forEach((btn) => {
+          const key = btn.getAttribute("data-llm");
+          if (key in out) {
+            out[key] = btn.classList.contains("launcher-pill--on");
+          }
+        });
+        return out;
+      }
+
+      if (launcherTargets) {
+        launcherTargets.addEventListener("click", (e) => {
+          const btn = e.target.closest(".launcher-pill[data-llm]");
+          if (!btn) {
+            return;
+          }
+          btn.classList.toggle("launcher-pill--on");
+          btn.setAttribute("aria-pressed", btn.classList.contains("launcher-pill--on"));
+        });
+      }
+
+      function renderNetworkOverlay(state) {
+        const show = Boolean(state.networkError) && !state.launcherActive;
+        networkOverlay.hidden = !show;
+      }
+
+      function renderLoadingOverlay(state) {
+        // Show the spinner only while the embedded view hasn't finished its first load,
+        // and never on top of the launcher or the offline overlay.
+        const show =
+          !state.viewReady && !state.launcherActive && !state.networkError;
+        loadingOverlay.hidden = !show;
+      }
+
+      function renderDebugOverlay(state) {
+        if (!state.debug) {
+          debugOverlay.hidden = true;
+          return;
+        }
+        debugOverlay.hidden = false;
+        debugOverlay.textContent = JSON.stringify(state.debug, null, 2);
+      }
+
+      function renderTabs(state) {
+        renderNetworkOverlay(state);
+        renderLoadingOverlay(state);
+        renderDebugOverlay(state);
+        const { proMode, tabs, tabLabels, activeIndex, launcherActive } = state;
+        if (!proMode || !tabs.length) {
+          tabBar.hidden = true;
+          tabBar.replaceChildren();
+          launcherShell.hidden = true;
+          return;
+        }
+
+        tabBar.hidden = false;
+        tabBar.replaceChildren();
+
+        tabs.forEach((url, i) => {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className =
+            "tab" + (launcherActive ? "" : i === activeIndex ? " tab--active" : "");
+          btn.title = url;
+          btn.textContent = (tabLabels && tabLabels[i]) || labelForTab(url, i);
+          btn.addEventListener("click", () => {
+            void window.slidePanel.setActiveTab(i);
+          });
+          tabBar.appendChild(btn);
+        });
+
+        const addBtn = document.createElement("button");
+        addBtn.type = "button";
+        addBtn.className = "tab tab-add" + (launcherActive ? " tab-add--active" : "");
+        addBtn.title = "Ask Claude, ChatGPT, and Gemini at once";
+        addBtn.setAttribute("aria-label", "New multi-LLM search");
+        addBtn.textContent = "+";
+        addBtn.addEventListener("click", () => {
+          void window.slidePanel.openDualSearchLauncher();
+        });
+        tabBar.appendChild(addBtn);
+
+        launcherShell.hidden = !launcherActive;
+        if (launcherActive) {
+          launcherInput.focus();
+        }
+      }
+
+      function labelForTab(url, index) {
+        try {
+          const host = new URL(url).hostname || url;
+          return host.replace(/^www\./, "") || `Tab ${index + 1}`;
+        } catch {
+          return `Tab ${index + 1}`;
+        }
+      }
+
+      launcherForm.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const text = (launcherInput.value || "").trim();
+        if (!text) {
+          launcherStatus.textContent = "Enter a question first.";
+          return;
+        }
+        launcherSubmit.disabled = true;
+        launcherStatus.textContent = "Sending…";
+        try {
+          const targets = getLauncherTargets();
+          const result = await window.slidePanel.submitDualSearch(text, targets);
+          if (result && result.ok) {
+            const sent = result.sent || targets;
+            const names = [];
+            if (sent.chatgpt) {
+              names.push("ChatGPT");
+            }
+            if (sent.gemini) {
+              names.push("Gemini");
+            }
+            if (sent.claude) {
+              names.push("Claude");
+            }
+            launcherStatus.textContent =
+              names.length > 0
+                ? `Submitted to ${names.join(", ")}. Open those tabs to see replies.`
+                : "Done.";
+            launcherInput.value = "";
+          } else {
+            launcherStatus.textContent = (result && result.error) || "Something went wrong.";
+          }
+        } catch (err) {
+          launcherStatus.textContent = err && err.message ? err.message : "Failed to send.";
+        } finally {
+          launcherSubmit.disabled = false;
+        }
+      });
+
+      async function init() {
+        const state = await window.slidePanel.getPanelState();
+        renderTabs(state);
+        window.slidePanel.onPanelState((next) => renderTabs(next));
+      }
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          window.slidePanel.hidePanel();
+        }
+      });
+
+      init();
+    </script>
+  </body>
+</html>
